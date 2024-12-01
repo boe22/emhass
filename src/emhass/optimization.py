@@ -137,6 +137,202 @@ class Optimization:
         :rtype: pd.DataFrame
 
         """
+        if def_total_hours is None:
+            def_total_hours = self.optim_conf['operating_hours_of_each_deferrable_load']
+        if def_start_timestep is None:
+            def_start_timestep = self.optim_conf['start_timesteps_of_each_deferrable_load']
+        if def_end_timestep is None:
+            def_end_timestep = self.optim_conf['end_timesteps_of_each_deferrable_load']
+        type_self_conso = 'bigm' # maxmin
+
+        #### The LP problem using Pulp ####
+        opt_model = plp.LpProblem("LP_Model", plp.LpMaximize)
+
+        n = len(data_opt.index)
+        set_I = range(n)
+        M = 10e10
+
+        for k in range(self.optim_conf['number_of_deferrable_loads']):
+            if type(self.optim_conf['nominal_power_of_deferrable_loads'][k]) != list:
+                self.logger.error("nominal_power_of_deferrable_loads contains non list items. ")
+
+        ## Add decision variables
+        P_grid_neg  = {(i):plp.LpVariable(cat='Continuous',
+                                          lowBound=-self.plant_conf['maximum_power_to_grid'], upBound=0,
+                                          name="P_grid_neg{}".format(i)) for i in set_I}
+        P_grid_pos  = {(i):plp.LpVariable(cat='Continuous',
+                                          lowBound=0, upBound=self.plant_conf['maximum_power_from_grid'],
+                                          name="P_grid_pos{}".format(i)) for i in set_I}
+        P_grid_direction_helper = plp.LpVariable.dicts("P_grid_direction_helper", (set_I), cat="Binary")
+        P_grid = plp.LpVariable.dicts("P_grid", (set_I), cat="Continuous")
+
+        P_deferrable = []
+        for k in range(self.optim_conf['number_of_deferrable_loads']):
+            print(self.optim_conf['nominal_power_of_deferrable_loads'][k])
+            P_deferrable.append(plp.LpVariable.dicts(f"Deferable{k}", (range(n-len(self.optim_conf['nominal_power_of_deferrable_loads'][k])+1)), cat="Binary"))
+
+        # TODO: toevoegen van start en eindtijden
+        deferrables_load_options = [[0 for i in set_I] for deferrable in P_deferrable]
+        for k in range(len(P_deferrable)):
+            for i in range(len(P_deferrable[k])):
+                for j in range(len(self.optim_conf['nominal_power_of_deferrable_loads'][k])):
+                    deferrables_load_options[k][min(j+i,n-1)] += self.optim_conf['nominal_power_of_deferrable_loads'][k][j]*P_deferrable[k][i]
+
+        P_sto_pos  = {(i):i*0 for i in set_I}
+        P_sto_neg  = {(i):i*0 for i in set_I}
+        
+        ## Define objective
+        P_def_sum= []
+        for i in set_I:
+            P_def_sum.append(plp.lpSum(deferrables_load_options[k][i] for k in range(self.optim_conf['number_of_deferrable_loads'])))
+
+        if self.costfun == 'profit':
+            objective = plp.lpSum(-0.001*self.timeStep*(unit_load_cost[i]*P_grid_pos[i] + \
+                unit_prod_price[i]*P_grid_neg[i]) for i in set_I)
+        else:
+            self.logger.error("The cost function specified type is not valid")
+
+        opt_model.setObjective(objective)
+
+        ## Setting constraints
+        # Constraint that only one option of Deferable_i is applicable:
+        for j in range(len(P_deferrable)):
+            opt_model += (plp.lpSum(P_deferrable[j]) == 1, f"Deferable{j}_once")
+
+        # The main constraint: power balance
+        # Contraint that determines grid position (P_grid)
+        for i in set_I:
+            deferrable_load_i = 0
+            for deferrable_load in deferrables_load_options:
+                deferrable_load_i += deferrable_load[i]
+            opt_model += (plp.lpSum(P_PV[i] - deferrable_load_i - P_load[i] +P_grid_neg[i] + P_grid_pos[i] + P_sto_pos[i] + P_sto_neg[i]) == 0, f"constraint_main3_{i}")
+
+            # Only import or export from grid
+            opt_model += (plp.lpSum(-P_grid_neg[i]-self.plant_conf['maximum_power_to_grid']*(1-P_grid_direction_helper[i])) <= 0, f"constraint_pgridneg_{i}")
+            opt_model += (plp.lpSum(P_grid_pos[i]-self.plant_conf['maximum_power_from_grid']*P_grid_direction_helper[i]) <= 0, f"constraint_pgridpos_{i}")
+
+        ## Finally, we call the solver to solve our optimization model:
+        # solving with default solver CBC
+        if self.lp_solver == 'PULP_CBC_CMD':
+            opt_model.solve(PULP_CBC_CMD(msg=0))
+        elif self.lp_solver == 'GLPK_CMD':
+            opt_model.solve(GLPK_CMD(msg=0))
+        elif self.lp_solver == 'COIN_CMD':
+            opt_model.solve(COIN_CMD(msg=0, path=self.lp_solver_path))
+        else:
+            self.logger.warning("Solver %s unknown, using default", self.lp_solver)
+            opt_model.solve()
+
+        # The status of the solution is printed to the screen
+        self.optim_status = plp.LpStatus[opt_model.status]
+        self.logger.info("Status: " + self.optim_status)
+        if plp.value(opt_model.objective) is None:
+            self.logger.warning("Cost function cannot be evaluated")
+            return
+        else:
+            self.logger.info("Total value of the Cost function = %.02f", plp.value(opt_model.objective))
+
+        # Build results Dataframe
+        opt_tp = pd.DataFrame()
+        opt_tp["P_PV"] = [P_PV[i] for i in set_I]
+        opt_tp["P_Load"] = [P_load[i] for i in set_I]
+
+        deferrables_load_optim = [[0 for i in set_I] for deferrable in P_deferrable]
+        for k in range(len(P_deferrable)):
+            for i in range(len(P_deferrable[k])):
+                for j in range(len(self.optim_conf['nominal_power_of_deferrable_loads'][k])):
+                    deferrables_load_optim[k][min(j+i,n-1)] += self.optim_conf['nominal_power_of_deferrable_loads'][k][j]*P_deferrable[k][i].varValue
+
+        for k in range(self.optim_conf['number_of_deferrable_loads']):
+            opt_tp["P_deferrable{}".format(k)] = deferrables_load_optim[k]
+        opt_tp["P_grid_pos"] = [P_grid_pos[i].varValue for i in set_I]
+        opt_tp["P_grid_neg"] = [P_grid_neg[i].varValue for i in set_I]
+        opt_tp["P_grid"] = [P_grid_pos[i].varValue + P_grid_neg[i].varValue for i in set_I]
+        if self.optim_conf['set_use_battery']:
+            opt_tp["P_batt"] = [P_sto_pos[i].varValue + P_sto_neg[i].varValue for i in set_I]
+            SOC_opt_delta = [(P_sto_pos[i].varValue*(1/self.plant_conf['battery_discharge_efficiency']) + \
+                              self.plant_conf['battery_charge_efficiency']*P_sto_neg[i].varValue)*(
+                                  self.timeStep/(self.plant_conf['battery_nominal_energy_capacity'])) for i in set_I]
+            SOCinit = copy.copy(soc_init)
+            SOC_opt = []
+            for i in set_I:
+                SOC_opt.append(SOCinit - SOC_opt_delta[i])
+                SOCinit = SOC_opt[i]
+            opt_tp["SOC_opt"] = SOC_opt
+        opt_tp.index = data_opt.index
+
+        # Lets compute the optimal cost function
+        P_def_sum_tp = []
+        for i in set_I:
+            P_def_sum_tp.append(sum(deferrables_load_optim[k][i] for k in range(self.optim_conf['number_of_deferrable_loads'])))
+        opt_tp["unit_load_cost"] = [unit_load_cost[i] for i in set_I]
+        opt_tp["unit_prod_price"] = [unit_prod_price[i] for i in set_I]
+        if self.optim_conf['set_total_pv_sell']:
+            opt_tp["cost_profit"] = [-0.001*self.timeStep*(unit_load_cost[i]*(P_load[i] + P_def_sum_tp[i]) + \
+                unit_prod_price[i]*P_grid_neg[i].varValue) for i in set_I]
+        else:
+            opt_tp["cost_profit"] = [-0.001*self.timeStep*(unit_load_cost[i]*P_grid_pos[i].varValue + \
+                unit_prod_price[i]*P_grid_neg[i].varValue) for i in set_I]
+
+        if self.costfun == 'profit':
+            if self.optim_conf['set_total_pv_sell']:
+                opt_tp["cost_fun_profit"] = [-0.001*self.timeStep*(unit_load_cost[i]*(P_load[i] + P_def_sum_tp[i]) + \
+                    unit_prod_price[i]*P_grid_neg[i].varValue) for i in set_I]
+            else:
+                opt_tp["cost_fun_profit"] = [-0.001*self.timeStep*(unit_load_cost[i]*P_grid_pos[i].varValue + \
+                    unit_prod_price[i]*P_grid_neg[i].varValue) for i in set_I]
+        else:
+            self.logger.error("The cost function specified type is not valid")
+
+        # Add the optimization status
+        opt_tp["optim_status"] = self.optim_status
+
+        return opt_tp
+    
+    def perform_optimization_original(self, data_opt: pd.DataFrame, P_PV: np.array, P_load: np.array, 
+                             unit_load_cost: np.array, unit_prod_price: np.array,
+                             soc_init: Optional[float] = None, soc_final: Optional[float] = None,
+                             def_total_hours: Optional[list] = None, 
+                             def_start_timestep: Optional[list] = None,
+                             def_end_timestep: Optional[list] = None,
+                             debug: Optional[bool] = False) -> pd.DataFrame:
+        r"""
+        Perform the actual optimization using linear programming (LP).
+        
+        :param data_opt: A DataFrame containing the input data. The results of the \
+            optimization will be appended (decision variables, cost function values, etc)
+        :type data_opt: pd.DataFrame
+        :param P_PV: The photovoltaic power values. This can be real historical \
+            values or forecasted values.
+        :type P_PV: numpy.array
+        :param P_load: The load power consumption values
+        :type P_load: np.array
+        :param unit_load_cost: The cost of power consumption for each unit of time. \
+            This is the cost of the energy from the utility in a vector sampled \
+            at the fixed freq value
+        :type unit_load_cost: np.array
+        :param unit_prod_price: The price of power injected to the grid each unit of time. \
+            This is the price of the energy injected to the utility in a vector \
+            sampled at the fixed freq value.
+        :type unit_prod_price: np.array
+        :param soc_init: The initial battery SOC for the optimization. This parameter \
+            is optional, if not given soc_init = soc_final = soc_target from the configuration file.
+        :type soc_init: float
+        :param soc_final: The final battery SOC for the optimization. This parameter \
+            is optional, if not given soc_init = soc_final = soc_target from the configuration file.
+        :type soc_final: 
+        :param def_total_hours: The functioning hours for this iteration for each deferrable load. \
+            (For continuous deferrable loads: functioning hours at nominal power)
+        :type def_total_hours: list
+        :param def_start_timestep: The timestep as from which each deferrable load is allowed to operate.
+        :type def_start_timestep: list
+        :param def_end_timestep: The timestep before which each deferrable load should operate.
+        :type def_end_timestep: list
+        :return: The input DataFrame with all the different results from the \
+            optimization appended
+        :rtype: pd.DataFrame
+
+        """
         # Prepare some data in the case of a battery
         if self.optim_conf['set_use_battery']:
             if soc_init is None:

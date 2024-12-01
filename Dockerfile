@@ -102,8 +102,8 @@ ENV PYTHONUNBUFFERED 1
 
 # Docker Labels for hass
 LABEL \
-    io.hass.name="emhass" \
-    io.hass.description="EMHASS: Energy Management for Home Assistant" \
+    io.hass.name="emhass_rl" \
+    io.hass.description="EMHASS: customized by RL" \
     io.hass.version=${BUILD_VERSION} \
     io.hass.type="addon" \
     io.hass.arch="aarch64|amd64|armhf|armv7"

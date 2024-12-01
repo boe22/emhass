@@ -18,9 +18,9 @@ long_description = (here / 'README.md').read_text(encoding='utf-8')
 # Fields marked as "Optional" may be commented out.
 
 setup(
-    name='emhass',  # Required
-    version='0.11.2',  # Required
-    description='An Energy Management System for Home Assistant',  # Optional
+    name='emhass_rl',  # Required
+    version='0.1.1',  # Required
+    description='An Energy Management System for Home Assistant, modified by RL',  # Optional
     long_description=long_description,  # Optional
     long_description_content_type='text/markdown',  # Optional (see note above)
     url='https://github.com/davidusb-geek/emhass',  # Optional

@@ -1,6 +1,6 @@
 {
-  "hass_url": "empty",
-  "long_lived_token": "empty",
+  "hass_url": "http://192.168.0.36:8123/",
+  "long_lived_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIwMzRhNTU1YzQxZjU0NDk0YjZkNDg0NTRlZTFlZDQ2ZiIsImlhdCI6MTczMjQzMzExOSwiZXhwIjoyMDQ3NzkzMTE5fQ.NP8DdBW3QouQbbNwhFS0mLDjRfaOE9-B2CFSajeOvLk",
   "solcast_api_key": "empty",
   "solcast_rooftop_id": "empty",
   "solar_forecast_kwp": 0,
@@ -9,5 +9,8 @@
   "Longitude": 0,
   "Altitude": 0,
   "data_path": "default",
-  "server_ip": "0.0.0.0"
+  "server_ip": "192.168.0.36",
+  "sensor_power_load_no_var_loads": "sensor.power_load_no_var_loads",
+  "sensor_power_photovoltaics": "sensor.vermogen_zonnepanelen",
+  "historic_days_to_retrieve": 9
 }
